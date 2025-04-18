@@ -1,24 +1,51 @@
-// server.js
-require('dotenv').config();
-const express = require('express');
-const cors    = require('cors');
-const { OpenAI } = require('openai');
+/******************************************************************
+ *  server.js  –  backend Threads + Analyze                       *
+ *  - ES Modules (import/export)                                  *
+ *  - Variabili prese da process.env                              *
+ ******************************************************************/
 
-// ——— chiavi
-const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY?.trim() });
+/* ---------- opzionale: carica .env solo in locale ---------- */
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+if (process.env.NODE_ENV !== 'production') {
+  // import dinamico per evitare "require" in ESM
+  const { config } = await import('dotenv');
+  config({ path: `${dirname(fileURLToPath(import.meta.url))}/.env` });
+}
+
+/* ---------- import librerie ---------- */
+import express from 'express';
+import cors from 'cors';
+import { OpenAI } from 'openai';
+
+/* ---------- variabili ambiente ---------- */
+const OPENAI_KEY   = (process.env.OPENAI_KEY   || '').trim();
 const ASSISTANT_ID = (process.env.ASSISTANT_ID || '').trim();
 
-if (!process.env.OPENAI_KEY || !ASSISTANT_ID)
-  throw new Error('⚠️  Manca OPENAI_KEY o ASSISTANT_ID nel .env su Render');
+if (!OPENAI_KEY || !ASSISTANT_ID) {
+  console.error('❌  OPENAI_KEY o ASSISTANT_ID mancanti nelle env di Render');
+  process.exit(1);
+}
 
+/* ---------- inizializza OpenAI ---------- */
+const openai = new OpenAI({ apiKey: OPENAI_KEY });
+
+/* ---------- Express app ---------- */
 const app = express();
 app.use(express.json());
-app.use(cors());                 // aperto a tutti. Se vuoi, limita col parametro origin
+app.use(cors());                 // CORS aperto; limita con { origin: "<dominio>" } se serve
 
-// ---- POST /api/conversation -----------------------------------------------
+/* ==================================================================== *
+ *  POST /api/conversation                                              *
+ *  - Se threadId è null, crea thread e salva l’id                      *
+ *  - Aggiunge il messaggio utente                                      *
+ *  - Avvia run e attende completamento                                 *
+ *  - Ritorna: { threadId, messages }                                   *
+ * ==================================================================== */
 app.post('/api/conversation', async (req, res) => {
   const { threadId, message } = req.body;
   let id = threadId;
+
   try {
     if (!id) {
       const th = await openai.beta.threads.create({
@@ -27,11 +54,13 @@ app.post('/api/conversation', async (req, res) => {
       id = th.id;
     } else {
       await openai.beta.threads.messages.create(id, {
-        role: 'user', content: message
+        role: 'user',
+        content: message
       });
     }
 
     let run = await openai.beta.threads.runs.create(id, { assistant_id: ASSISTANT_ID });
+
     while (run.status !== 'completed') {
       await new Promise(r => setTimeout(r, 600));
       run = await openai.beta.threads.runs.retrieve(id, run.id);
@@ -40,12 +69,16 @@ app.post('/api/conversation', async (req, res) => {
     const msgs = await openai.beta.threads.messages.list(id);
     res.json({ threadId: id, messages: msgs.data });
   } catch (err) {
-    console.error(err);
+    console.error('❌ /api/conversation error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---- POST /api/analyze -----------------------------------------------------
+/* ==================================================================== *
+ *  POST /api/analyze                                                   *
+ *  - Manda l’intera conversazione a GPT‑4o                              *
+ *  - Estrae { fullName, emailAddress, phoneNumber, description, userType }
+ * ==================================================================== */
 app.post('/api/analyze', async (req, res) => {
   const { messages } = req.body;
   const prompt = `
@@ -66,15 +99,18 @@ ${JSON.stringify(messages)}
         { role: 'user',   content: prompt }
       ]
     });
+
     let raw = comp.choices[0].message.content.trim();
-    if (raw.startsWith('```')) raw = raw.replace(/^```json\s*/i,'').replace(/```$/,'').trim();
+    if (raw.startsWith('```'))
+      raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+
     res.json(JSON.parse(raw));
   } catch (err) {
-    console.error(err);
+    console.error('❌ /api/analyze error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---- start -----------------------------------------------------------------
+/* ---------- avvio server ---------- */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('🚀  backend in ascolto porta', PORT));
+app.listen(PORT, () => console.log(`🚀  backend in ascolto sulla porta ${PORT}`));
