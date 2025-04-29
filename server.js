@@ -1,52 +1,68 @@
 /******************************************************************
- *  server.js  –  backend Threads + Analyze                       *
- *  - ES Modules (import/export)                                  *
- *  - Variabili prese da process.env                              *
+ *  server.js – Backend Threads + Analyze + Email notifier        *
+ *  © 2025 – ES Modules ready for Render                          *
  ******************************************************************/
 
-/* ---------- opzionale: carica .env solo in locale ---------- */
+/* -------------------- carica .env in locale ------------------- */
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 if (process.env.NODE_ENV !== 'production') {
-  // import dinamico per evitare "require" in ESM
   const { config } = await import('dotenv');
   config({ path: `${dirname(fileURLToPath(import.meta.url))}/.env` });
 }
 
-/* ---------- import librerie ---------- */
+/* -------------------- librerie ------------------- */
 import express from 'express';
 import cors from 'cors';
+import nodemailer from 'nodemailer';
 import { OpenAI } from 'openai';
 
-/* ---------- variabili ambiente ---------- */
-const OPENAI_KEY   = (process.env.OPENAI_KEY   || '').trim();
-const ASSISTANT_ID = (process.env.ASSISTANT_ID || '').trim();
+/* -------------------- variabili ambiente ------------------- */
+const OPENAI_KEY         = (process.env.OPENAI_KEY         || '').trim();
+const ASSISTANT_ID       = (process.env.ASSISTANT_ID       || '').trim();
+const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').trim();
 
-if (!OPENAI_KEY || !ASSISTANT_ID) {
-  console.error('❌  OPENAI_KEY o ASSISTANT_ID mancanti nelle env di Render');
+// mittente e destinatario – modifica TO_EMAIL se necessario
+const FROM_EMAIL = 'simoncinidiego10@gmail.com';
+const TO_EMAIL   = 'simonemalacarne@gmai.com'; // ← gmai.com: correggi se è un refuso
+
+if (!OPENAI_KEY || !ASSISTANT_ID || !GMAIL_APP_PASSWORD) {
+  console.error('❌  OPENAI_KEY, ASSISTANT_ID o GMAIL_APP_PASSWORD mancanti nelle variabili ambiente');
   process.exit(1);
 }
 
-/* ---------- inizializza OpenAI ---------- */
+/* -------------------- OpenAI ------------------- */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
-/* ---------- Express app ---------- */
+/* -------------------- Nodemailer ------------------- */
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: FROM_EMAIL,
+    pass: GMAIL_APP_PASSWORD
+  }
+});
+
+/* -------------------- Express ------------------- */
 const app = express();
 app.use(express.json());
-app.use(cors());                 // CORS aperto; limita con { origin: "<dominio>" } se serve
+app.use(cors()); // CORS aperto; restringi se necessario
+
+/* -------------------- helper ------------------- */
+function isComplete(obj) {
+  return Object.values(obj).every(v => typeof v === 'string' && v.trim() !== '');
+}
 
 /* ==================================================================== *
  *  POST /api/conversation                                              *
- *  - Se threadId è null, crea thread e salva l’id                      *
- *  - Aggiunge il messaggio utente                                      *
- *  - Avvia run e attende completamento                                 *
- *  - Ritorna: { threadId, messages }                                   *
+ *  (alias /chat lato frontend)                                         *
  * ==================================================================== */
 app.post('/api/conversation', async (req, res) => {
   const { threadId, message } = req.body;
   let id = threadId;
 
   try {
+    /* ------ crea thread se non c'è ------ */
     if (!id) {
       const th = await openai.beta.threads.create({
         messages: [{ role: 'user', content: message }]
@@ -59,10 +75,11 @@ app.post('/api/conversation', async (req, res) => {
       });
     }
 
+    /* ------ avvia run ------ */
     let run = await openai.beta.threads.runs.create(id, { assistant_id: ASSISTANT_ID });
 
     while (run.status !== 'completed') {
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 800));
       run = await openai.beta.threads.runs.retrieve(id, run.id);
     }
 
@@ -76,11 +93,12 @@ app.post('/api/conversation', async (req, res) => {
 
 /* ==================================================================== *
  *  POST /api/analyze                                                   *
- *  - Manda l’intera conversazione a GPT‑4o                              *
- *  - Estrae { fullName, emailAddress, phoneNumber, description, userType }
+ *  - se i dati sono completi ⇒ invia email e risponde {status:'finished'}
+ *  - se incompleti     ⇒ NON fa nulla (nessuna mail) e risponde 204    *
  * ==================================================================== */
 app.post('/api/analyze', async (req, res) => {
   const { messages } = req.body;
+
   const prompt = `
 You are a JSON extractor. From the conversation below, return ONLY a JSON with:
 fullName, emailAddress, phoneNumber, description, userType.
@@ -91,7 +109,8 @@ ${JSON.stringify(messages)}
 `.trim();
 
   try {
-    const comp = await openai.chat.completions.create({
+    /* ------ chiama GPT-4o per estrarre i dati ------ */
+    const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0,
       messages: [
@@ -100,17 +119,34 @@ ${JSON.stringify(messages)}
       ]
     });
 
-    let raw = comp.choices[0].message.content.trim();
+    /* ------ pulizia output ------ */
+    let raw = completion.choices[0].message.content.trim();
     if (raw.startsWith('```'))
       raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
 
-    res.json(JSON.parse(raw));
+    const data = JSON.parse(raw);
+
+    /* ------ se completo invia mail ------ */
+    if (isComplete(data)) {
+      const mail = {
+        from: `\"Chat Assistant\" <${FROM_EMAIL}>`,
+        to: TO_EMAIL,
+        subject: 'Nuovo contatto compilato',
+        text: JSON.stringify(data, null, 2)
+      };
+
+      await transporter.sendMail(mail);
+      return res.json({ status: 'finished', data });
+    }
+
+    /* ------ incompleto: non fare nulla, rispondi 204 No Content ------ */
+    return res.status(204).end();
   } catch (err) {
     console.error('❌ /api/analyze error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ---------- avvio server ---------- */
+/* -------------------- avvio server ------------------- */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀  backend in ascolto sulla porta ${PORT}`));
+app.listen(PORT, () => console.log(`🚀  Backend in ascolto sulla porta ${PORT}`));
