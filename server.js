@@ -24,7 +24,7 @@ const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').trim();
 
 // mittente e destinatario – modifica TO_EMAIL se necessario
 const FROM_EMAIL = 'simoncinidiego10@gmail.com';
-const TO_EMAIL   = 'simonemalacarne@gmai.com'; // ← gmai.com: correggi se è un refuso
+const TO_EMAIL   = 'simone@studiomalacarne.com'; // ← gmai.com: correggi se è un refuso
 
 if (!OPENAI_KEY || !ASSISTANT_ID || !GMAIL_APP_PASSWORD) {
   console.error('❌  OPENAI_KEY, ASSISTANT_ID o GMAIL_APP_PASSWORD mancanti nelle variabili ambiente');
