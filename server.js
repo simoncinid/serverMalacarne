@@ -6,9 +6,19 @@
 /* -------------------- carica .env in locale ------------------- */
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+console.log('🔧 Inizializzazione server...');
+console.log('🔧 NODE_ENV:', process.env.NODE_ENV);
+
 if (process.env.NODE_ENV !== 'production') {
-  const { config } = await import('dotenv');
-  config({ path: `${dirname(fileURLToPath(import.meta.url))}/.env` });
+  try {
+    const { config } = await import('dotenv');
+    config({ path: `${dirname(fileURLToPath(import.meta.url))}/.env` });
+    console.log('✅ .env caricato (locale)');
+  } catch (err) {
+    console.warn('⚠️  Impossibile caricare .env:', err.message);
+  }
+} else {
+  console.log('✅ Modalità produzione (nessun .env)');
 }
 
 /* -------------------- librerie ------------------- */
@@ -24,12 +34,18 @@ const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').trim();
 
 // mittente e destinatario – modifica TO_EMAIL se necessario
 const FROM_EMAIL = 'simoncinidiego10@gmail.com';
-const TO_EMAIL   = 'simone@studiomalacarne.com'; // ← gmai.com: correggi se è un refuso
+const TO_EMAIL   = 'simone@studiomalacarne.com';
+
+console.log('🔍 Verifica variabili ambiente...');
+console.log('🔍 OPENAI_KEY presente:', !!OPENAI_KEY);
+console.log('🔍 ASSISTANT_ID presente:', !!ASSISTANT_ID);
+console.log('🔍 GMAIL_APP_PASSWORD presente:', !!GMAIL_APP_PASSWORD);
 
 if (!OPENAI_KEY || !ASSISTANT_ID || !GMAIL_APP_PASSWORD) {
   console.error('❌  OPENAI_KEY, ASSISTANT_ID o GMAIL_APP_PASSWORD mancanti nelle variabili ambiente');
   process.exit(1);
 }
+console.log('✅ Tutte le variabili ambiente sono presenti');
 
 /* -------------------- OpenAI ------------------- */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
@@ -44,9 +60,16 @@ const transporter = nodemailer.createTransport({
 });
 
 /* -------------------- Express ------------------- */
+console.log('🔧 Configurazione Express...');
 const app = express();
 app.use(express.json());
 app.use(cors()); // CORS aperto; restringi se necessario
+
+/* -------------------- Health Check ------------------- */
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+console.log('✅ Endpoint /health configurato');
 
 /* -------------------- helper ------------------- */
 function isComplete(obj) {
@@ -149,4 +172,8 @@ ${JSON.stringify(messages)}
 
 /* -------------------- avvio server ------------------- */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀  Backend in ascolto sulla porta ${PORT}`));
+console.log(`🔧 Tentativo di avvio sulla porta ${PORT}...`);
+app.listen(PORT, () => {
+  console.log(`🚀  Backend in ascolto sulla porta ${PORT}`);
+  console.log(`🌐 Health check disponibile su: http://localhost:${PORT}/health`);
+});
