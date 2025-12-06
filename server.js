@@ -64,12 +64,27 @@ const transporter = nodemailer.createTransport({
 /* -------------------- Express ------------------- */
 console.log('🔧 Configurazione Express...');
 const app = express();
+
+// Middleware per loggare tutte le richieste
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`📥 [${timestamp}] ${req.method} ${req.path} - IP: ${req.ip || req.connection.remoteAddress}`);
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log(`📦 Body ricevuto:`, JSON.stringify(req.body).substring(0, 200));
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(cors()); // CORS aperto; restringi se necessario
+console.log('✅ Middleware Express configurati');
 
 /* -------------------- Health Check ------------------- */
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  console.log('💚 Health check richiesto');
+  const response = { status: 'ok', timestamp: new Date().toISOString() };
+  console.log('💚 Health check response:', response);
+  res.json(response);
 });
 console.log('✅ Endpoint /health configurato');
 
@@ -83,35 +98,56 @@ function isComplete(obj) {
  *  (alias /chat lato frontend)                                         *
  * ==================================================================== */
 app.post('/api/conversation', async (req, res) => {
+  console.log('💬 POST /api/conversation - Richiesta ricevuta');
   const { threadId, message } = req.body;
+  console.log('💬 threadId:', threadId || 'nuovo');
+  console.log('💬 message:', message?.substring(0, 100) || 'vuoto');
   let id = threadId;
 
   try {
     /* ------ crea thread se non c'è ------ */
     if (!id) {
+      console.log('💬 Creazione nuovo thread...');
       const th = await openai.beta.threads.create({
         messages: [{ role: 'user', content: message }]
       });
       id = th.id;
+      console.log('💬 Thread creato:', id);
     } else {
+      console.log('💬 Aggiunta messaggio al thread esistente:', id);
       await openai.beta.threads.messages.create(id, {
         role: 'user',
         content: message
       });
+      console.log('💬 Messaggio aggiunto al thread');
     }
 
     /* ------ avvia run ------ */
+    console.log('💬 Avvio run con assistant_id:', ASSISTANT_ID);
     let run = await openai.beta.threads.runs.create(id, { assistant_id: ASSISTANT_ID });
+    console.log('💬 Run creato, status iniziale:', run.status);
 
+    let attempts = 0;
     while (run.status !== 'completed') {
+      attempts++;
+      console.log(`💬 Run status (tentativo ${attempts}):`, run.status);
       await new Promise(r => setTimeout(r, 800));
       run = await openai.beta.threads.runs.retrieve(id, run.id);
+      
+      if (run.status === 'failed') {
+        console.error('💬 Run fallito:', run);
+        throw new Error('Run fallito: ' + JSON.stringify(run));
+      }
     }
 
+    console.log('💬 Run completato, recupero messaggi...');
     const msgs = await openai.beta.threads.messages.list(id);
+    console.log('💬 Messaggi recuperati:', msgs.data.length);
+    console.log('💬 Invio risposta al client');
     res.json({ threadId: id, messages: msgs.data });
   } catch (err) {
     console.error('❌ /api/conversation error:', err);
+    console.error('❌ Stack:', err.stack);
     res.status(500).json({ error: err.message });
   }
 });
@@ -122,7 +158,9 @@ app.post('/api/conversation', async (req, res) => {
  *  - se incompleti     ⇒ NON fa nulla (nessuna mail) e risponde 204    *
  * ==================================================================== */
 app.post('/api/analyze', async (req, res) => {
+  console.log('🔍 POST /api/analyze - Richiesta ricevuta');
   const { messages } = req.body;
+  console.log('🔍 Numero messaggi da analizzare:', messages?.length || 0);
 
   const prompt = `
 You are a JSON extractor. From the conversation below, return ONLY a JSON with:
@@ -135,6 +173,7 @@ ${JSON.stringify(messages)}
 
   try {
     /* ------ chiama GPT-4o per estrarre i dati ------ */
+    console.log('🔍 Chiamata a GPT-4o per estrazione dati...');
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0,
@@ -143,16 +182,23 @@ ${JSON.stringify(messages)}
         { role: 'user',   content: prompt }
       ]
     });
+    console.log('🔍 Risposta GPT-4o ricevuta');
 
     /* ------ pulizia output ------ */
     let raw = completion.choices[0].message.content.trim();
+    console.log('🔍 Raw response (primi 200 char):', raw.substring(0, 200));
     if (raw.startsWith('```'))
       raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
 
     const data = JSON.parse(raw);
+    console.log('🔍 Dati estratti:', JSON.stringify(data));
 
     /* ------ se completo invia mail ------ */
-    if (isComplete(data)) {
+    const complete = isComplete(data);
+    console.log('🔍 Dati completi?', complete);
+    
+    if (complete) {
+      console.log('📧 Invio email a:', TO_EMAIL);
       const mail = {
         from: `\"Chat Assistant\" <${FROM_EMAIL}>`,
         to: TO_EMAIL,
@@ -161,13 +207,16 @@ ${JSON.stringify(messages)}
       };
 
       await transporter.sendMail(mail);
+      console.log('📧 Email inviata con successo');
       return res.json({ status: 'finished', data });
     }
 
     /* ------ incompleto: non fare nulla, rispondi 204 No Content ------ */
+    console.log('🔍 Dati incompleti, risposta 204');
     return res.status(204).end();
   } catch (err) {
     console.error('❌ /api/analyze error:', err);
+    console.error('❌ Stack:', err.stack);
     res.status(500).json({ error: err.message });
   }
 });
@@ -178,11 +227,19 @@ console.log(`🔧 Tentativo di avvio sulla porta ${PORT}...`);
 
 try {
   app.listen(PORT, () => {
+    console.log('='.repeat(50));
     console.log(`🚀  Backend in ascolto sulla porta ${PORT}`);
     console.log(`🌐 Health check disponibile su: http://localhost:${PORT}/health`);
+    console.log(`📡 Endpoint disponibili:`);
+    console.log(`   - GET  /health`);
+    console.log(`   - POST /api/conversation`);
+    console.log(`   - POST /api/analyze`);
+    console.log('='.repeat(50));
+    console.log('✅ Server completamente avviato e pronto!');
   });
 } catch (err) {
   console.error('❌ Errore durante l\'avvio del server:', err);
+  console.error('❌ Stack:', err.stack);
   process.exit(1);
 }
 
