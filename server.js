@@ -3,6 +3,8 @@
  *  © 2025 – ES Modules ready for Render                          *
  ******************************************************************/
 
+console.log('📦 server.js caricato - avvio inizializzazione...');
+
 /* -------------------- carica .env in locale ------------------- */
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -173,7 +175,24 @@ ${JSON.stringify(messages)}
 /* -------------------- avvio server ------------------- */
 const PORT = process.env.PORT || 8080;
 console.log(`🔧 Tentativo di avvio sulla porta ${PORT}...`);
-app.listen(PORT, () => {
-  console.log(`🚀  Backend in ascolto sulla porta ${PORT}`);
-  console.log(`🌐 Health check disponibile su: http://localhost:${PORT}/health`);
+
+try {
+  app.listen(PORT, () => {
+    console.log(`🚀  Backend in ascolto sulla porta ${PORT}`);
+    console.log(`🌐 Health check disponibile su: http://localhost:${PORT}/health`);
+  });
+} catch (err) {
+  console.error('❌ Errore durante l\'avvio del server:', err);
+  process.exit(1);
+}
+
+// Gestione errori non catturati
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
 });
