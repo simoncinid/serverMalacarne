@@ -35,7 +35,7 @@ const ASSISTANT_ID       = (process.env.ASSISTANT_ID       || '').trim();
 const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').trim();
 
 // mittente e destinatario – modifica TO_EMAIL se necessario
-const FROM_EMAIL = 'simoncinidiego10@gmail.com';
+const FROM_EMAIL = 'reservationwebbitz@gmail.com';
 const TO_EMAIL   = 'simone@studiomalacarne.com';
 
 console.log('🔍 Verifica variabili ambiente...');
@@ -90,7 +90,12 @@ console.log('✅ Endpoint /health configurato');
 
 /* -------------------- helper ------------------- */
 function isComplete(obj) {
-  return Object.values(obj).every(v => typeof v === 'string' && v.trim() !== '');
+  // Per inviare un lead basta avere almeno un contatto (email O telefono)
+  const email = (obj.emailAddress || '').trim();
+  const phone = (obj.phoneNumber || '').trim();
+  
+  // Almeno uno dei due contatti deve essere presente
+  return email !== '' || phone !== '';
 }
 
 /* ==================================================================== *
