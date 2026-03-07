@@ -65,7 +65,7 @@ const transporter = nodemailer.createTransport({
 const SUBMIT_LEAD_TOOL = {
   type: 'function',
   name: 'submit_lead',
-  description: 'Invia i dati del lead allo studio quando hai raccolto almeno un contatto (email o telefono) e preferibilmente nome e descrizione dell\'esigenza. Chiama questa funzione una sola volta per lead, quando l\'utente ha fornito i dati necessari.',
+  description: 'Invia i dati del lead allo studio. Chiama SOLO quando hai ENTRAMBI: (1) almeno un contatto: email O telefono, (2) una descrizione minima dell\'esigenza/motivazione. Se manca anche solo uno dei due, NON chiamare: continua a fare domande per ottenere contatto e motivazione. Nome e cognome sono opzionali ma preferibili. Chiama una sola volta per lead.',
   parameters: {
     type: 'object',
     properties: {
@@ -75,15 +75,15 @@ const SUBMIT_LEAD_TOOL = {
       },
       emailAddress: {
         type: 'string',
-        description: 'Indirizzo email. Stringa vuota se non fornito.'
+        description: 'Indirizzo email. Obbligatorio almeno uno tra email e telefono.'
       },
       phoneNumber: {
         type: 'string',
-        description: 'Numero di telefono. Stringa vuota se non fornito.'
+        description: 'Numero di telefono. Obbligatorio almeno uno tra email e telefono.'
       },
       description: {
         type: 'string',
-        description: 'Breve descrizione dell\'esigenza o motivo del contatto. Stringa vuota se non fornito.'
+        description: 'Breve descrizione dell\'esigenza o motivo del contatto. Obbligatorio un minimo di motivazione.'
       },
       userType: {
         type: 'string',
@@ -95,6 +95,16 @@ const SUBMIT_LEAD_TOOL = {
   },
   strict: true
 };
+
+/** Verifica che il lead abbia almeno un contatto (email o telefono) e una motivazione minima. */
+function isLeadValid(data) {
+  const hasContact =
+    (data.emailAddress && String(data.emailAddress).trim() !== '') ||
+    (data.phoneNumber && String(data.phoneNumber).trim() !== '');
+  const hasMotivation =
+    data.description && String(data.description).trim().length >= 3;
+  return hasContact && hasMotivation;
+}
 
 /* -------------------- Express ------------------- */
 console.log('🔧 Configurazione Express...');
@@ -176,6 +186,17 @@ app.post('/api/conversation', async (req, res) => {
           } catch (e) {
             console.error('💬 submit_lead arguments parse error:', e);
             data = { fullName: '', emailAddress: '', phoneNumber: '', description: '', userType: '' };
+          }
+          if (!isLeadValid(data)) {
+            outputsToSend.push({
+              type: 'function_call_output',
+              call_id: item.call_id,
+              output: JSON.stringify({
+                success: false,
+                message: 'Dati insufficienti: servono almeno un contatto (email o telefono) e una breve descrizione dell\'esigenza. Chiedi all\'utente di fornire ciò che manca e poi richiama submit_lead.'
+              })
+            });
+            continue;
           }
           try {
             await sendLeadEmail(data);
