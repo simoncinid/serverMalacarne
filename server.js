@@ -1,5 +1,5 @@
 /******************************************************************
- *  server.js – Backend Threads + Analyze + Email notifier        *
+ *  server.js – Backend Responses API + Lead email notifier        *
  *  © 2025 – ES Modules ready for Render                          *
  ******************************************************************/
 
@@ -28,29 +28,29 @@ import express from 'express';
 import cors from 'cors';
 import nodemailer from 'nodemailer';
 import { OpenAI } from 'openai';
+import { STUDIO_INSTRUCTIONS } from './prompts/studio.js';
 
 /* -------------------- variabili ambiente ------------------- */
 const OPENAI_KEY         = (process.env.OPENAI_KEY         || '').trim();
-const ASSISTANT_ID       = (process.env.ASSISTANT_ID       || '').trim();
 const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').trim();
 
-// mittente e destinatario – modifica TO_EMAIL se necessario
 const FROM_EMAIL = 'reservationwebbitz@gmail.com';
 const TO_EMAIL   = 'simone@studiomalacarne.com';
 
 console.log('🔍 Verifica variabili ambiente...');
 console.log('🔍 OPENAI_KEY presente:', !!OPENAI_KEY);
-console.log('🔍 ASSISTANT_ID presente:', !!ASSISTANT_ID);
 console.log('🔍 GMAIL_APP_PASSWORD presente:', !!GMAIL_APP_PASSWORD);
 
-if (!OPENAI_KEY || !ASSISTANT_ID || !GMAIL_APP_PASSWORD) {
-  console.error('❌  OPENAI_KEY, ASSISTANT_ID o GMAIL_APP_PASSWORD mancanti nelle variabili ambiente');
+if (!OPENAI_KEY || !GMAIL_APP_PASSWORD) {
+  console.error('❌  OPENAI_KEY o GMAIL_APP_PASSWORD mancanti nelle variabili ambiente');
   process.exit(1);
 }
 console.log('✅ Tutte le variabili ambiente sono presenti');
 
 /* -------------------- OpenAI ------------------- */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
+
+const RESPONSES_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
 
 /* -------------------- Nodemailer ------------------- */
 const transporter = nodemailer.createTransport({
@@ -61,11 +61,45 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+/* -------------------- Tool submit_lead per Responses API ------------------- */
+const SUBMIT_LEAD_TOOL = {
+  type: 'function',
+  name: 'submit_lead',
+  description: 'Invia i dati del lead allo studio quando hai raccolto almeno un contatto (email o telefono) e preferibilmente nome e descrizione dell\'esigenza. Chiama questa funzione una sola volta per lead, quando l\'utente ha fornito i dati necessari.',
+  parameters: {
+    type: 'object',
+    properties: {
+      fullName: {
+        type: 'string',
+        description: 'Nome e cognome del contatto. Stringa vuota se non fornito.'
+      },
+      emailAddress: {
+        type: 'string',
+        description: 'Indirizzo email. Stringa vuota se non fornito.'
+      },
+      phoneNumber: {
+        type: 'string',
+        description: 'Numero di telefono. Stringa vuota se non fornito.'
+      },
+      description: {
+        type: 'string',
+        description: 'Breve descrizione dell\'esigenza o motivo del contatto. Stringa vuota se non fornito.'
+      },
+      userType: {
+        type: 'string',
+        description: 'Tipologia utente: Privato, Professionista o Azienda. Stringa vuota se non specificato.'
+      }
+    },
+    required: ['fullName', 'emailAddress', 'phoneNumber', 'description', 'userType'],
+    additionalProperties: false
+  },
+  strict: true
+};
+
 /* -------------------- Express ------------------- */
 console.log('🔧 Configurazione Express...');
 const app = express();
 
-// Middleware per loggare tutte le richieste
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
   console.log(`📥 [${timestamp}] ${req.method} ${req.path} - IP: ${req.ip || req.connection.remoteAddress}`);
@@ -76,151 +110,106 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
-app.use(cors()); // CORS aperto; restringi se necessario
+app.use(cors());
 console.log('✅ Middleware Express configurati');
 
 /* -------------------- Health Check ------------------- */
 app.get('/health', (req, res) => {
   console.log('💚 Health check richiesto');
-  const response = { status: 'ok', timestamp: new Date().toISOString() };
-  console.log('💚 Health check response:', response);
-  res.json(response);
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 console.log('✅ Endpoint /health configurato');
 
-/* -------------------- helper ------------------- */
-function isComplete(obj) {
-  // Per inviare un lead basta avere almeno un contatto (email O telefono)
-  const email = (obj.emailAddress || '').trim();
-  const phone = (obj.phoneNumber || '').trim();
-  
-  // Almeno uno dei due contatti deve essere presente
-  return email !== '' || phone !== '';
+/* -------------------- Invio email lead ------------------- */
+async function sendLeadEmail(data) {
+  const mail = {
+    from: `"Chat Assistant" <${FROM_EMAIL}>`,
+    to: TO_EMAIL,
+    subject: 'Nuovo contatto compilato',
+    text: JSON.stringify(data, null, 2)
+  };
+  await transporter.sendMail(mail);
+  console.log('📧 Email lead inviata a:', TO_EMAIL);
 }
 
-/* ==================================================================== *
- *  POST /api/conversation                                              *
- *  (alias /chat lato frontend)                                         *
- * ==================================================================== */
+/* -------------------- POST /api/conversation (Responses API) ------------------- */
 app.post('/api/conversation', async (req, res) => {
   console.log('💬 POST /api/conversation - Richiesta ricevuta');
-  const { threadId, message } = req.body;
-  console.log('💬 threadId:', threadId || 'nuovo');
+  const { message, previousResponseId } = req.body;
+  console.log('💬 previousResponseId:', previousResponseId || 'nuova conversazione');
   console.log('💬 message:', message?.substring(0, 100) || 'vuoto');
-  let id = threadId;
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'Campo message obbligatorio e non vuoto' });
+  }
 
   try {
-    /* ------ crea thread se non c'è ------ */
-    if (!id) {
-      console.log('💬 Creazione nuovo thread...');
-      const th = await openai.beta.threads.create({
-        messages: [{ role: 'user', content: message }]
-      });
-      id = th.id;
-      console.log('💬 Thread creato:', id);
-    } else {
-      console.log('💬 Aggiunta messaggio al thread esistente:', id);
-      await openai.beta.threads.messages.create(id, {
-        role: 'user',
-        content: message
-      });
-      console.log('💬 Messaggio aggiunto al thread');
-    }
+    const input = [{ role: 'user', content: message.trim() }];
+    const baseParams = {
+      model: RESPONSES_MODEL,
+      instructions: STUDIO_INSTRUCTIONS,
+      tools: [SUBMIT_LEAD_TOOL],
+      tool_choice: 'auto',
+      store: true,
+      temperature: 0.3
+    };
 
-    /* ------ avvia run ------ */
-    console.log('💬 Avvio run con assistant_id:', ASSISTANT_ID);
-    let run = await openai.beta.threads.runs.create(id, { assistant_id: ASSISTANT_ID });
-    console.log('💬 Run creato, status iniziale:', run.status);
+    let response = await openai.responses.create({
+      ...baseParams,
+      input,
+      ...(previousResponseId && { previous_response_id: previousResponseId })
+    });
 
-    let attempts = 0;
-    while (run.status !== 'completed') {
-      attempts++;
-      console.log(`💬 Run status (tentativo ${attempts}):`, run.status);
-      await new Promise(r => setTimeout(r, 800));
-      run = await openai.beta.threads.runs.retrieve(id, run.id);
-      
-      if (run.status === 'failed') {
-        console.error('💬 Run fallito:', run);
-        throw new Error('Run fallito: ' + JSON.stringify(run));
+    let leadSubmitted = false;
+
+    // Loop: se la risposta contiene function_call (submit_lead), eseguiamo e richiamiamo l'API
+    while (response.output && response.output.some(item => item.type === 'function_call')) {
+      const nextInput = [...response.output];
+
+      for (const item of response.output) {
+        if (item.type === 'function_call' && item.name === 'submit_lead') {
+          let data;
+          try {
+            data = JSON.parse(item.arguments);
+          } catch (e) {
+            console.error('💬 submit_lead arguments parse error:', e);
+            data = { fullName: '', emailAddress: '', phoneNumber: '', description: '', userType: '' };
+          }
+          try {
+            await sendLeadEmail(data);
+            leadSubmitted = true;
+            nextInput.push({
+              type: 'function_call_output',
+              call_id: item.call_id,
+              output: JSON.stringify({ success: true, message: 'Lead inviato. Un consulente contatterà l\'utente.' })
+            });
+          } catch (mailErr) {
+            console.error('📧 Errore invio email lead:', mailErr);
+            nextInput.push({
+              type: 'function_call_output',
+              call_id: item.call_id,
+              output: JSON.stringify({ success: false, message: 'Errore invio dati. Riprova più tardi.' })
+            });
+          }
+        }
       }
+
+      response = await openai.responses.create({
+        ...baseParams,
+        input: nextInput,
+        previous_response_id: response.id
+      });
     }
 
-    console.log('💬 Run completato, recupero messaggi...');
-    const msgs = await openai.beta.threads.messages.list(id);
-    console.log('💬 Messaggi recuperati:', msgs.data.length);
-    console.log('💬 Invio risposta al client');
-    res.json({ threadId: id, messages: msgs.data });
+    console.log('💬 Risposta pronta, leadSubmitted:', leadSubmitted);
+    res.json({
+      responseId: response.id,
+      output: response.output,
+      output_text: response.output_text ?? '',
+      leadSubmitted
+    });
   } catch (err) {
     console.error('❌ /api/conversation error:', err);
-    console.error('❌ Stack:', err.stack);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ==================================================================== *
- *  POST /api/analyze                                                   *
- *  - se i dati sono completi ⇒ invia email e risponde {status:'finished'}
- *  - se incompleti     ⇒ NON fa nulla (nessuna mail) e risponde 204    *
- * ==================================================================== */
-app.post('/api/analyze', async (req, res) => {
-  console.log('🔍 POST /api/analyze - Richiesta ricevuta');
-  const { messages } = req.body;
-  console.log('🔍 Numero messaggi da analizzare:', messages?.length || 0);
-
-  const prompt = `
-You are a JSON extractor. From the conversation below, return ONLY a JSON with:
-fullName, emailAddress, phoneNumber, description, userType.
-If a field is missing, use an empty string.
-
-Conversation:
-${JSON.stringify(messages)}
-`.trim();
-
-  try {
-    /* ------ chiama GPT-4o per estrarre i dati ------ */
-    console.log('🔍 Chiamata a GPT-4o per estrazione dati...');
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      temperature: 0,
-      messages: [
-        { role: 'system', content: 'Extract customer info to JSON.' },
-        { role: 'user',   content: prompt }
-      ]
-    });
-    console.log('🔍 Risposta GPT-4o ricevuta');
-
-    /* ------ pulizia output ------ */
-    let raw = completion.choices[0].message.content.trim();
-    console.log('🔍 Raw response (primi 200 char):', raw.substring(0, 200));
-    if (raw.startsWith('```'))
-      raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
-
-    const data = JSON.parse(raw);
-    console.log('🔍 Dati estratti:', JSON.stringify(data));
-
-    /* ------ se completo invia mail ------ */
-    const complete = isComplete(data);
-    console.log('🔍 Dati completi?', complete);
-    
-    if (complete) {
-      console.log('📧 Invio email a:', TO_EMAIL);
-      const mail = {
-        from: `\"Chat Assistant\" <${FROM_EMAIL}>`,
-        to: TO_EMAIL,
-        subject: 'Nuovo contatto compilato',
-        text: JSON.stringify(data, null, 2)
-      };
-
-      await transporter.sendMail(mail);
-      console.log('📧 Email inviata con successo');
-      return res.json({ status: 'finished', data });
-    }
-
-    /* ------ incompleto: non fare nulla, rispondi 204 No Content ------ */
-    console.log('🔍 Dati incompleti, risposta 204');
-    return res.status(204).end();
-  } catch (err) {
-    console.error('❌ /api/analyze error:', err);
     console.error('❌ Stack:', err.stack);
     res.status(500).json({ error: err.message });
   }
@@ -234,21 +223,16 @@ try {
   app.listen(PORT, () => {
     console.log('='.repeat(50));
     console.log(`🚀  Backend in ascolto sulla porta ${PORT}`);
-    console.log(`🌐 Health check disponibile su: http://localhost:${PORT}/health`);
-    console.log(`📡 Endpoint disponibili:`);
-    console.log(`   - GET  /health`);
-    console.log(`   - POST /api/conversation`);
-    console.log(`   - POST /api/analyze`);
+    console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+    console.log(`📡 Endpoint: GET /health, POST /api/conversation`);
     console.log('='.repeat(50));
-    console.log('✅ Server completamente avviato e pronto!');
+    console.log('✅ Server pronto (Responses API + submit_lead)');
   });
 } catch (err) {
   console.error('❌ Errore durante l\'avvio del server:', err);
-  console.error('❌ Stack:', err.stack);
   process.exit(1);
 }
 
-// Gestione errori non catturati
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
   process.exit(1);
