@@ -162,9 +162,11 @@ app.post('/api/conversation', async (req, res) => {
 
     let leadSubmitted = false;
 
-    // Loop: se la risposta contiene function_call (submit_lead), eseguiamo e richiamiamo l'API
+    // Loop: se la risposta contiene function_call (submit_lead), eseguiamo e richiamiamo l'API.
+    // Con previous_response_id la risposta precedente è già nel contesto: inviare solo i
+    // function_call_output per evitare "Duplicate item found with id" (non rispedire response.output).
     while (response.output && response.output.some(item => item.type === 'function_call')) {
-      const nextInput = [...response.output];
+      const outputsToSend = [];
 
       for (const item of response.output) {
         if (item.type === 'function_call' && item.name === 'submit_lead') {
@@ -178,14 +180,14 @@ app.post('/api/conversation', async (req, res) => {
           try {
             await sendLeadEmail(data);
             leadSubmitted = true;
-            nextInput.push({
+            outputsToSend.push({
               type: 'function_call_output',
               call_id: item.call_id,
               output: JSON.stringify({ success: true, message: 'Lead inviato. Un consulente contatterà l\'utente.' })
             });
           } catch (mailErr) {
             console.error('📧 Errore invio email lead:', mailErr);
-            nextInput.push({
+            outputsToSend.push({
               type: 'function_call_output',
               call_id: item.call_id,
               output: JSON.stringify({ success: false, message: 'Errore invio dati. Riprova più tardi.' })
@@ -196,7 +198,7 @@ app.post('/api/conversation', async (req, res) => {
 
       response = await openai.responses.create({
         ...baseParams,
-        input: nextInput,
+        input: outputsToSend,
         previous_response_id: response.id
       });
     }
